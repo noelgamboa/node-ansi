@@ -147,12 +147,12 @@ var ANSI = function() {
 						cursor.x = Math.max(cursor.x - opts[0], 0);
 						break;
 					case 'f':
-						cursor.y = (isNaN(opts[0])) ? 1 : opts[0];
-						cursor.x = (opts.length < 2) ? 1 : opts[1];
+						cursor.y = (isNaN(opts[0])) ? 0 : (opts[0] - 1);
+						cursor.x = (opts.length < 2) ? 0 : (opts[1] - 1);
 						break;
 					case 'H':
-						cursor.y = (isNaN(opts[0])) ? 1 : opts[0];
-						cursor.x = (opts.length < 2) ? 1 : opts[1];
+						cursor.y = (isNaN(opts[0])) ? 0 : (opts[0] - 1);
+						cursor.x = (opts.length < 2) ? 0 : (opts[1] - 1);
 						break;
 					case 'm':
 						for(var o in opts) {
@@ -180,6 +180,7 @@ var ANSI = function() {
 						cursor = copyObject(cursorStore);
 						break;
 					case 'J':
+						console.log("(%d, %d) screen clear (J): arg=%d", cursor.y, cursor.x, opts[0]);
 						if(opts.length == 1 && opts[0] == 2) {
 						/*	for(var d in this.data) {
 								var o = copyObject(this.data[d]);
@@ -188,24 +189,28 @@ var ANSI = function() {
 								cursor.y = 0;
 								cursor.x = 0;
 							} */
-							for(var y = 0; y < 24; y++) {
-								for(var x = 0; x < 80; x++) {
-									this.data.push(
-										{	'cursor' : {
-												'x' : x,
-												'y' : y
-											},
-											'graphics' : {
-												'bright' : false,
-												'blink' : false,
-												'foreground' : 37,
-												'background' : 40
-											},
-											'chr' : " "
-										}
-									);
-								}
-							}
+							if (this.data.length > 0) {
+                for(var y = 0; y < 24; y++) {
+                  for(var x = 0; x < 80; x++) {
+                    this.data.push(
+                      {	'cursor' : {
+                          'x' : x,
+                          'y' : y
+                        },
+                        'graphics' : {
+                          'bright' : false,
+                          'blink' : false,
+                          'foreground' : 37,
+                          'background' : 40
+                        },
+                        'chr' : " "
+                      }
+                    );
+                  }
+                }
+              } else {
+                // initial clear screen, do nothing
+              }
 						}
 						break;
 					case 'K':
@@ -218,14 +223,14 @@ var ANSI = function() {
 						}
 						break;
 					default:
-						// Unknown or unimplemented command
+						console.log("Unimplemented command $s", cmd);
 						break;
 				}
 			}
 			width = Math.max(cursor.x, width);
 			height = Math.max(cursor.y, height);
 		}
-
+    console.log("Computed width and height is %d %d", width, height);
 	}
 
 	this.fromFile = function(fileName) {
@@ -360,10 +365,16 @@ var ANSI = function() {
 			options = {};
 		if(typeof options.scale != "number")
 			options.scale = 1;
+		if(typeof options.aspectRatio != "number")
+    	options.aspectRatio = 1;
+    if(typeof options.scroll != "boolean")
+      options.scroll = false;
 		
 		var encoder = new GIFEncoder(
 			Math.ceil(this.pixelWidth * options.scale),
-			Math.ceil(this.pixelHeight * options.scale)
+			options.scroll ?
+			  Math.ceil(16 * Math.min((height + 1), 25) * options.scale * options.aspectRatio) :
+			  Math.ceil(this.pixelHeight * options.scale * options.aspectRatio)
 		);
 		var rs = encoder.createReadStream();
 
@@ -386,13 +397,24 @@ var ANSI = function() {
 		var canvas = new ansiCanvas(
 			this.pixelWidth,
 			this.pixelHeight,
-			options.scale
+			options.scale,
+			options.aspectRatio,
+			options.scroll
 		);
 
+    console.log("Scroll setting: %s", options.scroll ? "true" : "false");
+    var yprev = 0;
 		for(var d = 0; d < self.data.length; d++) {
+		  if (options.scroll && yprev >= 24 && self.data[d].cursor.y > yprev) {
+		    yprev = self.data[d].cursor.y;
+		    		  console.log("%d: scrolling.", yprev);
+		    canvas.doScroll();
+		  } else {
+		    yprev = self.data[d].cursor.y;
+		  }
 			canvas.putCharacter(
 				self.data[d].cursor.x,
-				self.data[d].cursor.y,
+				(options.scroll && self.data[d].cursor.y > 24) ? 24 : self.data[d].cursor.y,
 				self.data[d].chr.charCodeAt(0),
 				defs.Attributes[self.data[d].graphics.foreground].attribute|((self.data[d].graphics.bright)?defs.Attributes[1].attribute:0),
 				(defs.Attributes[self.data[d].graphics.background].attribute>>4)
@@ -414,6 +436,7 @@ var ANSI = function() {
 			this.pixelWidth,
 			this.pixelHeight,
 			(typeof options.scale == "number") ? options.scale : 1,
+			(typeof options.aspectRatio == "number") ? options.aspectRatio : 1,
 			(typeof options.quality == "number" && options.quality >= 0 && options.quality <= 4) ? options.quality : 4
 		);
 		for(var y in matrix) {
@@ -444,7 +467,8 @@ var ANSI = function() {
 		var canvas = new ansiCanvas(
 			this.pixelWidth,
 			this.pixelHeight,
-			(typeof options.scale == "number") ? options.scale : 1
+			(typeof options.scale == "number") ? options.scale : 1,
+			(typeof options.aspectRatio == "number") ? options.aspectRatio : 1
 		);
 
 		var child = spawn(
@@ -499,7 +523,7 @@ util.inherits(ANSI, events.EventEmitter);
 
 // Lazily ported and modified from my old HTML5 ANSI editor
 // Could be simplified and folded into ANSI.toGIF() at some point
-var ansiCanvas = function(width, height, scale, quality) {
+var ansiCanvas = function(width, height, scale, aspectRatio, scroll, quality) {
 
 	var foregroundCanvas,
 		foregroundContext,
@@ -512,6 +536,8 @@ var ansiCanvas = function(width, height, scale, quality) {
 		'width' : width,
 		'height' : height,
 		'scale' : (typeof scale != "number") ? 1 : scale,
+		'aspectRatio' : (typeof aspectRatio != "number") ? 1 : aspectRatio,
+		'scroll' : (typeof scroll != "boolean") ? false : scroll,
 		'quality' : (typeof quality != "number" || quality < 1 || quality > 5) ? 4 : quality - 1,
 		'characters' : [],
 		'spriteSheet' : new Image(),
@@ -554,7 +580,7 @@ var ansiCanvas = function(width, height, scale, quality) {
 			0,
 			0,
 			Math.ceil(properties.width * properties.scale),
-			Math.ceil(properties.height * properties.scale)
+			Math.ceil(properties.height * properties.scale * properties.aspectRatio)
 		);
 		mergeContext.drawImage(
 			foregroundCanvas,
@@ -565,7 +591,7 @@ var ansiCanvas = function(width, height, scale, quality) {
 			0,
 			0,
 			Math.ceil(properties.width * properties.scale),
-			Math.ceil(properties.height * properties.scale)
+			Math.ceil(properties.height * properties.scale * properties.aspectRatio)
 		);
 	}
 
@@ -610,7 +636,7 @@ var ansiCanvas = function(width, height, scale, quality) {
 		foregroundCanvas = new Canvas(properties.width, properties.height);
 		foregroundContext = foregroundCanvas.getContext('2d');
 
-		mergeCanvas = new Canvas(Math.ceil(properties.width * properties.scale), Math.ceil(properties.height * properties.scale));
+		mergeCanvas = new Canvas(Math.ceil(properties.width * properties.scale), Math.ceil(properties.height * properties.scale * properties.aspectRatio));
 		mergeContext = mergeCanvas.getContext('2d');
 		mergeContext.patternQuality = properties.qualityMap[properties.quality];
 		mergeContext.filter = properties.qualityMap[properties.quality];
@@ -666,6 +692,13 @@ var ansiCanvas = function(width, height, scale, quality) {
 			properties.spriteHeight
 		);
 
+	}
+
+	this.doScroll = function() {
+    var backgroundData = backgroundContext.getImageData(0, 16, properties.width, properties.height - properties.spriteHeight);
+    backgroundContext.putImageData(backgroundData, 0, 0);
+    var foregroundData = foregroundContext.getImageData(0, 16, properties.width, properties.height - properties.spriteHeight);
+    foregroundContext.putImageData(foregroundData, 0, 0);
 	}
 
 	initSpriteSheet();
